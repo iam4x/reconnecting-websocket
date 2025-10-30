@@ -1,0 +1,38 @@
+{
+  "name": "@iam4x/reconnecting-websocket",
+  "module": "src/index.ts",
+  "type": "module",
+  "license": "MIT",
+  "version": "1.0.0",
+  "private": false,
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "test": "bun test",
+    "lint": "bun run lint:eslint && bun run lint:tsc",
+    "lint:eslint": "eslint src",
+    "lint:tsc": "tsc --noEmit",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.38.0",
+    "@typescript-eslint/parser": "^8.46.2",
+    "eslint": "^9.38.0",
+    "eslint-config-prettier": "10.1.1",
+    "eslint-import-resolver-typescript": "4.3.1",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-prettier": "^5.5.4",
+    "globals": "^16.4.0",
+    "husky": "^9.1.7",
+    "prettier": "^3.6.2",
+    "typescript-eslint": "^8.46.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
