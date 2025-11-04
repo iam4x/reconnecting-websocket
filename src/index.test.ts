@@ -735,4 +735,40 @@ describe("ReconnectingWebSocket", () => {
     // This test will FAIL with the bug because created.length will be 2 instead of 3
     expect(created.length).toBe(3);
   });
+
+  it("should remove event listeners from socket when close() is called", () => {
+    // This test exposes the memory leak: event listeners are not removed from socket
+    // when close() is called, preventing proper garbage collection
+
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+    });
+
+    const instance = created[0];
+    instance.readyState = FakeWebSocket.OPEN;
+    instance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN);
+
+    // Track removeEventListener calls to verify listeners are removed
+    let removeEventListenerCallCount = 0;
+    const originalRemoveEventListener =
+      instance.removeEventListener.bind(instance);
+    instance.removeEventListener = function (...args: any[]) {
+      removeEventListenerCallCount++;
+      return originalRemoveEventListener(...args);
+    };
+
+    // Close the connection
+    // Bug: Event listeners are not removed, causing memory leak
+    // After fix: All 4 event listeners (open, message, close, error) should be removed
+    ws.close();
+
+    // Verify that removeEventListener was called for all event listeners
+    // Expected: 4 calls (one for each listener: open, message, close, error)
+    // With bug: 0 calls (listeners are not removed)
+    // This test will FAIL with the bug because removeEventListenerCallCount will be 0 instead of 4
+    expect(removeEventListenerCallCount).toBe(4);
+  });
 });

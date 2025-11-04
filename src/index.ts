@@ -253,6 +253,13 @@ export class ReconnectingWebSocket {
     this.clearTimers();
 
     if (this.ws) {
+      // Remove event listeners before closing to prevent memory leaks
+      if (this.openFn) this.ws.removeEventListener("open", this.openFn);
+      if (this.messageFn)
+        this.ws.removeEventListener("message", this.messageFn);
+      if (this.closeFn) this.ws.removeEventListener("close", this.closeFn);
+      if (this.errorFn) this.ws.removeEventListener("error", this.errorFn);
+
       this.ws.close(...args);
       this.ws = undefined;
     }
