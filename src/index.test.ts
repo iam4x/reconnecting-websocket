@@ -567,4 +567,68 @@ describe("ReconnectingWebSocket", () => {
     expect(messages.length).toBe(1);
     expect(messages[0].data).toBe("from-second");
   });
+
+  it("should clean up abort signal listeners when connect() is called multiple times", () => {
+    // This test exposes the memory leak bug: abort signal listeners accumulate
+    // when connect() is called multiple times because old listeners aren't removed
+
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      connectionTimeout: 1000,
+    });
+
+    const firstInstance = created[0];
+    expect(created.length).toBe(1);
+    firstInstance.readyState = FakeWebSocket.CONNECTING;
+
+    // Access the first abort controller via type assertion (for testing)
+    const firstAbortController = ws.abortController;
+    expect(firstAbortController).toBeDefined();
+
+    // Count how many listeners are attached to the first abort signal
+    // We can't directly count, but we can verify cleanup by checking
+    // if manually aborting the old controller causes issues
+
+    // Call connect() again - this creates a new abort controller
+    // Bug: The old abort controller's signal listener is NOT removed
+    ws.connect();
+
+    const secondInstance = created[1];
+    expect(created.length).toBe(2);
+    secondInstance.readyState = FakeWebSocket.CONNECTING;
+
+    const secondAbortController = ws.abortController;
+    expect(secondAbortController).toBeDefined();
+    expect(secondAbortController).not.toBe(firstAbortController);
+
+    // Verify the first abort controller still has its listener attached (the bug)
+    // We can't directly count listeners, but we can test by manually aborting
+    // the old controller and verifying it doesn't interfere
+
+    // Verify second socket is in CONNECTING state
+    expect(secondInstance.readyState).toBe(FakeWebSocket.CONNECTING);
+
+    // Manually abort the first (old) abort controller
+    // Bug: If the listener wasn't cleaned up, it will fire and check this.ws
+    // Since this.ws is now the second socket, the old handler will incorrectly
+    // close the second socket because it's CONNECTING
+    firstAbortController?.abort();
+
+    // The bug: The old abort handler fires and checks this.ws (which is secondInstance)
+    // Since secondInstance is CONNECTING, the old handler closes it (BUG!)
+    // This test will FAIL with the bug because secondInstance will be CLOSED
+    // After the fix, aborting the old controller should NOT affect the current socket
+    // because the listener will have been removed
+
+    // Verify the second socket was NOT closed by the old abort handler
+    // With the bug present, this will fail because secondInstance.readyState will be CLOSED
+    expect(secondInstance.readyState).toBe(FakeWebSocket.CONNECTING);
+
+    // Verify second connection can still proceed normally
+    secondInstance.readyState = FakeWebSocket.OPEN;
+    secondInstance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN);
+  });
 });

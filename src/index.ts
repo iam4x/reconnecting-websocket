@@ -29,6 +29,7 @@ export class ReconnectingWebSocket {
   private messageFn?: (event: MessageEvent) => void;
   private closeFn?: (event: CloseEvent) => void;
   private errorFn?: (event: Event) => void;
+  private abortHandler?: () => void;
 
   listeners: Record<EventType, Listener[]> = {
     open: [],
@@ -75,16 +76,18 @@ export class ReconnectingWebSocket {
       this.ws?.close();
     }
 
-    // Clear any pending timers
+    // Clear any pending timers (this also removes abort listener from old controller)
     this.clearTimers();
 
     // Create new abort controller
     this.abortController = new AbortController();
-    this.abortController.signal.addEventListener("abort", () => {
+    this.abortHandler = () => {
       if (this.ws?.readyState === WebSocket.CONNECTING) {
         this.ws.close();
       }
-    });
+    };
+
+    this.abortController.signal.addEventListener("abort", this.abortHandler);
 
     // Create new socket
     this.ws = new this.options.WebSocketConstructor(this.options.url);
@@ -209,7 +212,14 @@ export class ReconnectingWebSocket {
       this.reconnectTimeout = undefined;
     }
 
-    if (this.abortController) {
+    if (this.abortController && this.abortHandler) {
+      this.abortController.signal.removeEventListener(
+        "abort",
+        this.abortHandler,
+      );
+      this.abortController = undefined;
+      this.abortHandler = undefined;
+    } else if (this.abortController) {
       this.abortController = undefined;
     }
 
