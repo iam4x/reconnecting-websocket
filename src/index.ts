@@ -26,7 +26,7 @@ export class ReconnectingWebSocket {
 
   // Store event handlers so we can remove them when cleaning up
   private openFn?: (event: Event) => void;
-  private messageFn?: (event: MessageEvent) => void;
+  private msgFn?: (event: MessageEvent) => void;
   private closeFn?: (event: CloseEvent) => void;
   private errorFn?: (event: Event) => void;
   private abortHandler?: () => void;
@@ -68,7 +68,7 @@ export class ReconnectingWebSocket {
 
     // Remove event listeners from old socket
     if (this.openFn) this.ws?.removeEventListener("open", this.openFn);
-    if (this.messageFn) this.ws?.removeEventListener("message", this.messageFn);
+    if (this.msgFn) this.ws?.removeEventListener("message", this.msgFn);
     if (this.closeFn) this.ws?.removeEventListener("close", this.closeFn);
     if (this.errorFn) this.ws?.removeEventListener("error", this.errorFn);
 
@@ -121,7 +121,7 @@ export class ReconnectingWebSocket {
       }
     };
 
-    this.messageFn = (event: MessageEvent) => {
+    this.msgFn = (event: MessageEvent) => {
       // Only process if event is from the current socket
       if (event.target === currentWs && this.ws === currentWs) {
         this.emit("message", event);
@@ -149,7 +149,7 @@ export class ReconnectingWebSocket {
 
     // Add event listeners to new socket
     currentWs.addEventListener("open", this.openFn);
-    currentWs.addEventListener("message", this.messageFn);
+    currentWs.addEventListener("message", this.msgFn);
     currentWs.addEventListener("close", this.closeFn);
     currentWs.addEventListener("error", this.errorFn);
   }
@@ -255,8 +255,7 @@ export class ReconnectingWebSocket {
     if (this.ws) {
       // Remove event listeners before closing to prevent memory leaks
       if (this.openFn) this.ws.removeEventListener("open", this.openFn);
-      if (this.messageFn)
-        this.ws.removeEventListener("message", this.messageFn);
+      if (this.msgFn) this.ws.removeEventListener("message", this.msgFn);
       if (this.closeFn) this.ws.removeEventListener("close", this.closeFn);
       if (this.errorFn) this.ws.removeEventListener("error", this.errorFn);
 
