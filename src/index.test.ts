@@ -520,4 +520,51 @@ describe("ReconnectingWebSocket", () => {
     // Should not have reconnected
     expect(created.length).toBe(1);
   });
+
+  it("should not process events from old socket when connect() is called multiple times", () => {
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+    });
+
+    const opens: Event[] = [];
+    const messages: MessageEvent[] = [];
+    ws.addEventListener("open", (event) => opens.push(event));
+    ws.addEventListener("message", (event: MessageEvent) =>
+      messages.push(event),
+    );
+
+    // First connection attempt
+    const firstInstance = created[0];
+    expect(created.length).toBe(1);
+
+    // Before first connection completes, trigger another connect()
+    // This simulates a race condition where connect() is called again
+    ws.connect();
+
+    // Second connection attempt should be created
+    const secondInstance = created[1];
+    expect(created.length).toBe(2);
+
+    // Now fire events on BOTH sockets
+    // The first socket should be ignored, only second socket's events should be processed
+    firstInstance.readyState = FakeWebSocket.OPEN;
+    firstInstance.dispatchEvent(new Event("open"));
+    firstInstance.dispatchEvent(
+      new MessageEvent("message", { data: "from-first" }),
+    );
+
+    secondInstance.readyState = FakeWebSocket.OPEN;
+    secondInstance.dispatchEvent(new Event("open"));
+    secondInstance.dispatchEvent(
+      new MessageEvent("message", { data: "from-second" }),
+    );
+
+    flushTimers();
+
+    // Only the second socket's events should be processed
+    // This test will fail if events from the first socket are still processed
+    expect(opens.length).toBe(1);
+    expect(messages.length).toBe(1);
+    expect(messages[0].data).toBe("from-second");
+  });
 });

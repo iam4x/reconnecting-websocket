@@ -24,6 +24,12 @@ export class ReconnectingWebSocket {
   forcedClose = false;
   wasConnected = false;
 
+  // Store event handlers so we can remove them when cleaning up
+  private openFn?: (event: Event) => void;
+  private messageFn?: (event: MessageEvent) => void;
+  private closeFn?: (event: CloseEvent) => void;
+  private errorFn?: (event: Event) => void;
+
   listeners: Record<EventType, Listener[]> = {
     open: [],
     message: [],
@@ -55,6 +61,24 @@ export class ReconnectingWebSocket {
   }
 
   connect() {
+    // Remove event listeners from old socket
+    if (this.openFn) this.ws?.removeEventListener("open", this.openFn);
+    if (this.messageFn) this.ws?.removeEventListener("message", this.messageFn);
+    if (this.closeFn) this.ws?.removeEventListener("close", this.closeFn);
+    if (this.errorFn) this.ws?.removeEventListener("error", this.errorFn);
+
+    // Close old socket if still connecting or open
+    if (
+      this.ws?.readyState === WebSocket.CONNECTING ||
+      this.ws?.readyState === WebSocket.OPEN
+    ) {
+      this.ws?.close();
+    }
+
+    // Clear any pending timers
+    this.clearTimers();
+
+    // Create new abort controller
     this.abortController = new AbortController();
     this.abortController.signal.addEventListener("abort", () => {
       if (this.ws?.readyState === WebSocket.CONNECTING) {
@@ -62,43 +86,65 @@ export class ReconnectingWebSocket {
       }
     });
 
+    // Create new socket
     this.ws = new this.options.WebSocketConstructor(this.options.url);
 
     this.connectTimeout = setTimeout(() => {
       this.abortController?.abort();
     }, this.options.connectionTimeout);
 
-    this.ws.addEventListener("open", (event) => {
-      this.clearTimers();
-      this.retryCount = 0;
-      this.emit("open", event);
+    // Create and store new event handlers
+    // Capture the new socket reference to check against in handlers
+    const currentWs = this.ws;
 
-      // Emit reconnect event if this was a reconnection after a disconnection
-      if (this.wasConnected) {
-        this.emit("reconnect", event);
+    this.openFn = (event: Event) => {
+      // Only process if event is from the current socket
+      if (event.target === currentWs && this.ws === currentWs) {
+        this.clearTimers();
+        this.retryCount = 0;
+        this.emit("open", event);
+
+        // Emit reconnect event if this was a reconnection after a disconnection
+        if (this.wasConnected) {
+          this.emit("reconnect", event);
+        }
+
+        this.wasConnected = true;
+        this.startHealthCheck();
       }
+    };
 
-      this.wasConnected = true;
-      this.startHealthCheck();
-    });
-
-    this.ws.addEventListener("message", (event: MessageEvent) => {
-      this.emit("message", event);
-    });
-
-    this.ws.addEventListener("close", (event: CloseEvent) => {
-      this.stopHealthCheck();
-      this.emit("close", { code: event.code, reason: event.reason });
-
-      if (!this.forcedClose) {
-        this.scheduleReconnect();
+    this.messageFn = (event: MessageEvent) => {
+      // Only process if event is from the current socket
+      if (event.target === currentWs && this.ws === currentWs) {
+        this.emit("message", event);
       }
-    });
+    };
 
-    this.ws.addEventListener("error", (event: Event) => {
-      this.emit("error", event);
-      // Error will typically cause connection to close, triggering reconnect
-    });
+    this.closeFn = (event: CloseEvent) => {
+      // Only process if event is from the current socket
+      if (event.target === currentWs && this.ws === currentWs) {
+        this.stopHealthCheck();
+        this.emit("close", { code: event.code, reason: event.reason });
+
+        if (!this.forcedClose) {
+          this.scheduleReconnect();
+        }
+      }
+    };
+
+    this.errorFn = (event: Event) => {
+      // Only process if event is from the current socket
+      if (event.target === currentWs && this.ws === currentWs) {
+        this.emit("error", event);
+      }
+    };
+
+    // Add event listeners to new socket
+    currentWs.addEventListener("open", this.openFn);
+    currentWs.addEventListener("message", this.messageFn);
+    currentWs.addEventListener("close", this.closeFn);
+    currentWs.addEventListener("error", this.errorFn);
   }
 
   emit(event: EventType, payload: any) {
