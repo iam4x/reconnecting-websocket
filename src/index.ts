@@ -7,6 +7,7 @@ interface ReconnectOptions {
   connectionTimeout?: number;
   backoffFactor?: number;
   WebSocketConstructor?: typeof WebSocket;
+  healthCheckInterval?: number;
 }
 
 export class ReconnectingWebSocket {
@@ -17,6 +18,7 @@ export class ReconnectingWebSocket {
 
   connectTimeout?: ReturnType<typeof setTimeout>;
   reconnectTimeout?: ReturnType<typeof setTimeout>;
+  healthCheckInterval?: ReturnType<typeof setInterval>;
 
   retryCount = 0;
   forcedClose = false;
@@ -46,6 +48,7 @@ export class ReconnectingWebSocket {
       connectionTimeout: options.connectionTimeout ?? 10_000,
       backoffFactor: options.backoffFactor ?? 2,
       WebSocketConstructor: options.WebSocketConstructor ?? WebSocket,
+      healthCheckInterval: options.healthCheckInterval ?? 30_000,
     };
 
     this.connect();
@@ -76,6 +79,7 @@ export class ReconnectingWebSocket {
       }
 
       this.wasConnected = true;
+      this.startHealthCheck();
     });
 
     this.ws.addEventListener("message", (event: MessageEvent) => {
@@ -83,6 +87,7 @@ export class ReconnectingWebSocket {
     });
 
     this.ws.addEventListener("close", (event: CloseEvent) => {
+      this.stopHealthCheck();
       this.emit("close", { code: event.code, reason: event.reason });
 
       if (!this.forcedClose) {
@@ -114,6 +119,39 @@ export class ReconnectingWebSocket {
     this.reconnectTimeout = setTimeout(() => this.connect(), delay);
   }
 
+  startHealthCheck() {
+    this.stopHealthCheck();
+
+    if (this.options.healthCheckInterval <= 0) {
+      return;
+    }
+
+    this.healthCheckInterval = setInterval(() => {
+      // Only check if we're not forcing a close and we expect to be connected
+      if (this.forcedClose) {
+        return;
+      }
+
+      // If we've been connected before and the socket is not OPEN, trigger reconnection
+      if (this.wasConnected && this.readyState !== WebSocket.OPEN) {
+        // Clear the existing socket reference since it's in a bad state
+        if (this.ws) {
+          // Don't emit close event since we didn't receive one - this is a silent failure
+          this.ws = undefined;
+        }
+        this.stopHealthCheck();
+        this.scheduleReconnect();
+      }
+    }, this.options.healthCheckInterval);
+  }
+
+  stopHealthCheck() {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = undefined;
+    }
+  }
+
   clearTimers() {
     if (this.connectTimeout) {
       clearTimeout(this.connectTimeout);
@@ -128,6 +166,8 @@ export class ReconnectingWebSocket {
     if (this.abortController) {
       this.abortController = undefined;
     }
+
+    this.stopHealthCheck();
   }
 
   addEventListener(event: EventType, listener: Listener) {

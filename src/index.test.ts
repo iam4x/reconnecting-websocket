@@ -6,7 +6,10 @@ describe("ReconnectingWebSocket", () => {
   let created: any[];
   let originalSetTimeout: typeof setTimeout;
   let originalClearTimeout: typeof clearTimeout;
+  let originalSetInterval: typeof setInterval;
+  let originalClearInterval: typeof clearInterval;
   let timeouts: Map<number, () => void>;
+  let intervals: Map<number, () => void>;
   let timerId: number;
   let flushTimers: () => void;
 
@@ -49,9 +52,12 @@ describe("ReconnectingWebSocket", () => {
     created = [];
     // stub timers with manual queue
     timeouts = new Map();
+    intervals = new Map();
     timerId = 1;
     originalSetTimeout = globalThis.setTimeout;
     originalClearTimeout = globalThis.clearTimeout;
+    originalSetInterval = globalThis.setInterval;
+    originalClearInterval = globalThis.clearInterval;
 
     globalThis.setTimeout = ((fn: (...args: any[]) => void) => {
       const id = timerId++;
@@ -63,16 +69,33 @@ describe("ReconnectingWebSocket", () => {
       timeouts.delete(id);
     }) as unknown as typeof clearTimeout;
 
+    globalThis.setInterval = ((fn: (...args: any[]) => void) => {
+      const id = timerId++;
+      intervals.set(id, fn as () => void);
+      return id as any;
+    }) as unknown as typeof setInterval;
+
+    globalThis.clearInterval = ((id?: any) => {
+      intervals.delete(id);
+    }) as unknown as typeof clearInterval;
+
     flushTimers = () => {
-      const fns = Array.from(timeouts.values());
+      const timeoutFns = Array.from(timeouts.values());
+      const intervalFns = Array.from(intervals.values());
+      // Clear timeouts after execution (they only fire once)
       timeouts.clear();
-      for (const fn of fns) fn();
+      // Keep intervals in the map (they fire repeatedly)
+      // Execute all intervals
+      for (const fn of timeoutFns) fn();
+      for (const fn of intervalFns) fn();
     };
   });
 
   afterEach(() => {
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
   });
 
   it("should dispatch open event", async () => {
@@ -420,5 +443,81 @@ describe("ReconnectingWebSocket", () => {
     ws.send("after close");
     // Should only have messages sent before close
     expect(instance.sentData).toEqual(["before open", "after open"]);
+  });
+
+  it("should reconnect when readyState is not OPEN without close event (silent failure)", () => {
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      healthCheckInterval: 100,
+      retryDelay: 50,
+    });
+
+    // First connection opens
+    const firstInstance = created[0];
+    firstInstance.readyState = FakeWebSocket.OPEN;
+    firstInstance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(created.length).toBe(1);
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN);
+
+    // Simulate silent failure - socket enters bad state without close event
+    firstInstance.readyState = FakeWebSocket.CLOSED;
+    // Don't dispatch close event - this simulates the bug scenario
+
+    // Trigger health check interval (should now detect the bad state and schedule reconnect)
+    flushTimers();
+
+    // Flush again to trigger the scheduled reconnect
+    flushTimers();
+
+    // Should have scheduled a reconnect, which will create a new socket
+    expect(created.length).toBe(2);
+  });
+
+  it("should not start health check if healthCheckInterval is 0", () => {
+    new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      healthCheckInterval: 0,
+    });
+
+    const instance = created[0];
+    instance.readyState = FakeWebSocket.OPEN;
+    instance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    // Simulate silent failure
+    instance.readyState = FakeWebSocket.CLOSED;
+
+    // Flush timers - should not trigger reconnect since health check is disabled
+    flushTimers();
+
+    // Should not have reconnected
+    expect(created.length).toBe(1);
+  });
+
+  it("should stop health check on forced close", () => {
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      healthCheckInterval: 100,
+    });
+
+    const instance = created[0];
+    instance.readyState = FakeWebSocket.OPEN;
+    instance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    // Force close
+    ws.close();
+    flushTimers();
+
+    // Simulate state change after close
+    instance.readyState = FakeWebSocket.CLOSED;
+
+    // Flush timers - health check should not trigger reconnect
+    flushTimers();
+
+    // Should not have reconnected
+    expect(created.length).toBe(1);
   });
 });
