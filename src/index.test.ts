@@ -681,4 +681,58 @@ describe("ReconnectingWebSocket", () => {
     // This test will FAIL with the bug because created.length will be 3 instead of 2
     expect(finalCount).toBe(initialCount + 1);
   });
+
+  it("should reset forcedClose flag when connect() is called after close()", () => {
+    // This test exposes the bug: forcedClose flag is never reset after close(),
+    // so manual reconnections won't auto-reconnect if they disconnect
+
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      retryDelay: 100,
+    });
+
+    const firstInstance = created[0];
+    firstInstance.readyState = FakeWebSocket.OPEN;
+    firstInstance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(created.length).toBe(1);
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN);
+
+    // Close the connection - this sets forcedClose = true
+    ws.close();
+    flushTimers();
+
+    expect(ws.readyState).toBe(FakeWebSocket.CLOSED);
+    expect(created.length).toBe(1); // Should not have reconnected
+
+    // Manually reconnect by calling connect()
+    // After calling connect(), forcedClose should be reset to false
+    // so that if this new connection closes, it can reconnect automatically
+    ws.connect();
+
+    const secondInstance = created[1];
+    expect(created.length).toBe(2);
+    secondInstance.readyState = FakeWebSocket.OPEN;
+    secondInstance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN);
+
+    // Now close the second connection (not via ws.close(), but via event)
+    // This simulates an unexpected disconnection
+    // Bug: With forcedClose still true, it won't reconnect
+    // After fix: With forcedClose reset to false, it should reconnect
+    secondInstance.dispatchEvent(new CloseEvent("close"));
+    flushTimers(); // Trigger reconnect if scheduled
+
+    // Flush again to let reconnect timeout fire
+    flushTimers();
+
+    // Verify reconnection behavior
+    // Expected: Should reconnect (created.length = 3)
+    // With bug: Won't reconnect because forcedClose is still true (created.length = 2)
+    // This test will FAIL with the bug because created.length will be 2 instead of 3
+    expect(created.length).toBe(3);
+  });
 });

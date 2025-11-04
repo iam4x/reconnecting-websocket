@@ -62,6 +62,10 @@ export class ReconnectingWebSocket {
   }
 
   connect() {
+    // Reset forcedClose flag to allow reconnection for new connection attempts
+    // This ensures that manual reconnections (via connect()) can auto-reconnect
+    this.forcedClose = false;
+
     // Remove event listeners from old socket
     if (this.openFn) this.ws?.removeEventListener("open", this.openFn);
     if (this.messageFn) this.ws?.removeEventListener("message", this.messageFn);
