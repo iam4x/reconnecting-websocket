@@ -157,6 +157,12 @@ export class ReconnectingWebSocket {
   }
 
   scheduleReconnect() {
+    // Clear any existing reconnect timeout first to prevent multiple reconnects
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = undefined;
+    }
+
     const { retryDelay, backoffFactor, maxRetryDelay } = this.options;
 
     const delay = Math.min(

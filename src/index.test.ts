@@ -631,4 +631,54 @@ describe("ReconnectingWebSocket", () => {
 
     expect(ws.readyState).toBe(FakeWebSocket.OPEN);
   });
+
+  it("should not schedule multiple reconnect timeouts when scheduleReconnect is called multiple times", () => {
+    // This test exposes the bug: if scheduleReconnect() is called multiple times
+    // before the timeout fires, multiple reconnect attempts will be made
+
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      retryDelay: 100, // Short delay for testing
+    });
+
+    const firstInstance = created[0];
+    firstInstance.readyState = FakeWebSocket.OPEN;
+    firstInstance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(created.length).toBe(1);
+
+    // Close the connection - this triggers scheduleReconnect() from closeFn
+    // This schedules the first reconnect timeout
+    firstInstance.dispatchEvent(new CloseEvent("close"));
+    // Don't flush yet - we want the timeout to still be pending
+
+    // At this point, scheduleReconnect() has been called once and a timeout is scheduled
+    // Now call scheduleReconnect() again before the first timeout fires
+    // This simulates a scenario where both close handler and health check call it
+    // Bug: This schedules a second timeout without clearing the first one
+    ws.scheduleReconnect();
+
+    // With the bug: two timeouts are now scheduled, both will fire
+    // After the fix: the second call should clear the first timeout, so only one fires
+
+    // Count initial socket count before reconnects fire
+    const initialCount = created.length;
+    expect(initialCount).toBe(1);
+
+    // Flush timers to let reconnect timeouts fire
+    // With the bug: both timeouts fire, causing connect() to be called twice
+    // After the fix: only one timeout fires, causing connect() to be called once
+    flushTimers();
+
+    // Verify the number of connection attempts
+    // Expected: 2 sockets total (1 initial + 1 reconnect)
+    // With bug: 3 sockets total (1 initial + 2 reconnects from both timeouts)
+    const finalCount = created.length;
+
+    // The bug: if scheduleReconnect doesn't clear previous timeout,
+    // we'll have more connections than expected
+    // This test will FAIL with the bug because created.length will be 3 instead of 2
+    expect(finalCount).toBe(initialCount + 1);
+  });
 });
