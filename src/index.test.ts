@@ -413,7 +413,7 @@ describe("ReconnectingWebSocket", () => {
     expect(instance.sentData).toEqual([]);
   });
 
-  it("should send data when socket exists (even if not fully open)", () => {
+  it("should queue messages when socket is not open and send on open", () => {
     const ws = new ReconnectingWebSocket("ws://test", {
       WebSocketConstructor: FakeWebSocket as any,
     });
@@ -422,24 +422,24 @@ describe("ReconnectingWebSocket", () => {
     // Socket exists but is CONNECTING
     expect(instance.readyState).toBe(FakeWebSocket.CONNECTING);
 
-    // Send will be called on the socket (implementation doesn't check readyState)
+    // Send will queue the message since socket is not open
     ws.send("before open");
-    expect(instance.sentData).toEqual(["before open"]);
+    expect(instance.sentData).toEqual([]);
 
     // Open connection
     instance.readyState = FakeWebSocket.OPEN;
     instance.dispatchEvent(new Event("open"));
     flushTimers();
 
-    // Send should still work
+    // Queued message should now be sent, then send another
     ws.send("after open");
     expect(instance.sentData).toEqual(["before open", "after open"]);
 
-    // Close connection (this clears ws.ws)
+    // Close connection (this clears ws.ws and the queue)
     ws.close();
     flushTimers();
 
-    // Try to send after close (socket is now undefined)
+    // Try to send after close (message will be queued but queue was cleared)
     ws.send("after close");
     // Should only have messages sent before close
     expect(instance.sentData).toEqual(["before open", "after open"]);
@@ -770,5 +770,169 @@ describe("ReconnectingWebSocket", () => {
     // With bug: 0 calls (listeners are not removed)
     // This test will FAIL with the bug because removeEventListenerCallCount will be 0 instead of 4
     expect(removeEventListenerCallCount).toBe(4);
+  });
+
+  describe("message queue", () => {
+    it("should queue messages sent before socket opens and send them when connected", () => {
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: FakeWebSocket as any,
+      });
+
+      const instance = created[0];
+      // Socket is in CONNECTING state
+      expect(instance.readyState).toBe(FakeWebSocket.CONNECTING);
+
+      // Send messages before socket is open
+      ws.send("message1");
+      ws.send("message2");
+      ws.send("message3");
+
+      // Messages should NOT be sent to the underlying socket yet (it's not open)
+      expect(instance.sentData).toEqual([]);
+
+      // Open the connection
+      instance.readyState = FakeWebSocket.OPEN;
+      instance.dispatchEvent(new Event("open"));
+      flushTimers();
+
+      // Now all queued messages should have been sent in order
+      expect(instance.sentData).toEqual(["message1", "message2", "message3"]);
+    });
+
+    it("should queue messages sent after socket closes and send them when reconnected", () => {
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: FakeWebSocket as any,
+        retryDelay: 100,
+      });
+
+      const firstInstance = created[0];
+      // Open first connection
+      firstInstance.readyState = FakeWebSocket.OPEN;
+      firstInstance.dispatchEvent(new Event("open"));
+      flushTimers();
+
+      // Send a message while connected
+      ws.send("connected-message");
+      expect(firstInstance.sentData).toEqual(["connected-message"]);
+
+      // Simulate unexpected close (triggers reconnect)
+      firstInstance.dispatchEvent(new CloseEvent("close"));
+      flushTimers(); // Trigger reconnect scheduling
+
+      // At this point, socket is reconnecting (second instance created)
+      expect(created.length).toBe(2);
+      const secondInstance = created[1];
+
+      // Send messages while disconnected/reconnecting
+      ws.send("queued1");
+      ws.send("queued2");
+
+      // Messages should NOT be sent to new socket yet (it's not open)
+      expect(secondInstance.sentData).toEqual([]);
+
+      // Open second connection
+      secondInstance.readyState = FakeWebSocket.OPEN;
+      secondInstance.dispatchEvent(new Event("open"));
+      flushTimers();
+
+      // Now queued messages should have been sent to second instance
+      expect(secondInstance.sentData).toEqual(["queued1", "queued2"]);
+    });
+
+    it("should send immediately when socket is already open", () => {
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: FakeWebSocket as any,
+      });
+
+      const instance = created[0];
+      // Open the connection
+      instance.readyState = FakeWebSocket.OPEN;
+      instance.dispatchEvent(new Event("open"));
+      flushTimers();
+
+      // Send message while connected
+      ws.send("immediate-message");
+
+      // Should be sent immediately
+      expect(instance.sentData).toEqual(["immediate-message"]);
+    });
+
+    it("should preserve message order across reconnections", () => {
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: FakeWebSocket as any,
+        retryDelay: 100,
+      });
+
+      const firstInstance = created[0];
+      // Send messages before first open
+      ws.send("pre-open-1");
+      ws.send("pre-open-2");
+
+      expect(firstInstance.sentData).toEqual([]);
+
+      // Open first connection
+      firstInstance.readyState = FakeWebSocket.OPEN;
+      firstInstance.dispatchEvent(new Event("open"));
+      flushTimers();
+
+      // Pre-open messages should be sent
+      expect(firstInstance.sentData).toEqual(["pre-open-1", "pre-open-2"]);
+
+      // Send while connected
+      ws.send("connected");
+      expect(firstInstance.sentData).toEqual([
+        "pre-open-1",
+        "pre-open-2",
+        "connected",
+      ]);
+
+      // Disconnect
+      firstInstance.dispatchEvent(new CloseEvent("close"));
+      flushTimers();
+
+      const secondInstance = created[1];
+
+      // Send while disconnected
+      ws.send("queued-1");
+      ws.send("queued-2");
+
+      expect(secondInstance.sentData).toEqual([]);
+
+      // Reconnect
+      secondInstance.readyState = FakeWebSocket.OPEN;
+      secondInstance.dispatchEvent(new Event("open"));
+      flushTimers();
+
+      // Queued messages should be sent in order
+      expect(secondInstance.sentData).toEqual(["queued-1", "queued-2"]);
+    });
+
+    it("should clear queue when forcedClose is called", () => {
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: FakeWebSocket as any,
+      });
+
+      const instance = created[0];
+      // Socket is in CONNECTING state
+      expect(instance.readyState).toBe(FakeWebSocket.CONNECTING);
+
+      // Queue some messages
+      ws.send("message1");
+      ws.send("message2");
+
+      // Force close
+      ws.close();
+      flushTimers();
+
+      // Manually reconnect
+      ws.connect();
+      const secondInstance = created[1];
+      secondInstance.readyState = FakeWebSocket.OPEN;
+      secondInstance.dispatchEvent(new Event("open"));
+      flushTimers();
+
+      // Queued messages from before close() should be discarded
+      expect(secondInstance.sentData).toEqual([]);
+    });
   });
 });

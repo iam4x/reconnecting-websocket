@@ -39,6 +39,9 @@ export class ReconnectingWebSocket {
     error: [],
   };
 
+  // Queue for messages sent when socket is not open
+  private messageQueue: Parameters<WebSocket["send"]>[] = [];
+
   get readyState() {
     return this.ws?.readyState ?? WebSocket.CLOSED;
   }
@@ -118,6 +121,9 @@ export class ReconnectingWebSocket {
 
         this.wasConnected = true;
         this.startHealthCheck();
+
+        // Flush any queued messages now that socket is open
+        this.flushMessageQueue();
       }
     };
 
@@ -245,12 +251,29 @@ export class ReconnectingWebSocket {
   }
 
   send(...args: Parameters<WebSocket["send"]>) {
-    this.ws?.send(...args);
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(...args);
+    } else {
+      this.messageQueue.push(args);
+    }
+  }
+
+  private flushMessageQueue() {
+    while (
+      this.messageQueue.length > 0 &&
+      this.ws?.readyState === WebSocket.OPEN
+    ) {
+      const args = this.messageQueue.shift()!;
+      this.ws.send(...args);
+    }
   }
 
   close(...args: Parameters<WebSocket["close"]>) {
     this.forcedClose = true;
     this.clearTimers();
+
+    // Clear the message queue on forced close
+    this.messageQueue = [];
 
     if (this.ws) {
       // Remove event listeners before closing to prevent memory leaks
