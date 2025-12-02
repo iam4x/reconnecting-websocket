@@ -5,6 +5,7 @@ A robust, TypeScript-first WebSocket client with automatic reconnection, exponen
 ## Features
 
 - ✅ **Automatic Reconnection** - Automatically reconnects on connection loss with exponential backoff
+- ✅ **Message Queueing** - Messages sent while disconnected are queued and delivered on reconnection
 - ✅ **Connection Timeout** - Configurable timeout to detect stalled connections
 - ✅ **Event-Driven API** - Familiar event listener pattern matching WebSocket API
 - ✅ **TypeScript Support** - Full TypeScript definitions included
@@ -119,14 +120,14 @@ ws.removeEventListener("open", handler);
 
 #### `send(data)`
 
-Sends data through the WebSocket connection.
+Sends data through the WebSocket connection. If the socket is not open, messages are automatically queued and sent once the connection is established.
 
 ```typescript
 ws.send("Hello, Server!");
 ws.send(JSON.stringify({ type: "ping" }));
 ```
 
-**Note:** This method will silently fail if the socket is not connected. Check `readyState` before sending if needed.
+**Note:** Messages sent while disconnected are queued and delivered in order when the socket opens. The queue is cleared if `close()` is called.
 
 #### `close(code?, reason?)`
 
@@ -194,29 +195,23 @@ const ws = new ReconnectingWebSocket("wss://api.example.com", {
 
 ### Handling Reconnections
 
-```typescript
-let messageQueue: string[] = [];
+Messages sent while disconnected are automatically queued and delivered when the connection is restored:
 
-ws.addEventListener("open", () => {
-  // Flush queued messages when reconnected
-  while (messageQueue.length > 0) {
-    ws.send(messageQueue.shift()!);
-  }
-});
+```typescript
+const ws = new ReconnectingWebSocket("wss://api.example.com");
 
 ws.addEventListener("reconnect", () => {
   console.log("Reconnected! Resuming operations...");
 });
 
-// Queue messages when disconnected
-function sendMessage(data: string) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(data);
-  } else {
-    messageQueue.push(data);
-  }
-}
+// Safe to call anytime - messages are queued if disconnected
+ws.send("message1");
+ws.send("message2");
+
+// When socket opens/reconnects, queued messages are sent automatically
 ```
+
+**Note:** Calling `close()` clears the message queue. Messages queued before a forced close are discarded.
 
 ### Error Handling
 
