@@ -8,6 +8,7 @@ interface ReconnectOptions {
   backoffFactor?: number;
   WebSocketConstructor?: typeof WebSocket;
   healthCheckInterval?: number;
+  watchingInactivityTimeout?: number;
 }
 
 export class ReconnectingWebSocket {
@@ -19,6 +20,7 @@ export class ReconnectingWebSocket {
   connectTimeout?: ReturnType<typeof setTimeout>;
   reconnectTimeout?: ReturnType<typeof setTimeout>;
   healthCheckInterval?: ReturnType<typeof setInterval>;
+  inactivityTimeout?: ReturnType<typeof setTimeout>;
 
   retryCount = 0;
   forcedClose = false;
@@ -59,6 +61,7 @@ export class ReconnectingWebSocket {
       backoffFactor: options.backoffFactor ?? 2,
       WebSocketConstructor: options.WebSocketConstructor ?? WebSocket,
       healthCheckInterval: options.healthCheckInterval ?? 30_000,
+      watchingInactivityTimeout: options.watchingInactivityTimeout ?? 0, // disabled by default, set to 300_000 for 5 minutes
     };
 
     this.connect();
@@ -121,6 +124,7 @@ export class ReconnectingWebSocket {
 
         this.wasConnected = true;
         this.startHealthCheck();
+        this.startInactivityTimer();
 
         // Flush any queued messages now that socket is open
         this.flushMessageQueue();
@@ -130,6 +134,7 @@ export class ReconnectingWebSocket {
     this.msgFn = (event: MessageEvent) => {
       // Only process if event is from the current socket
       if (event.target === currentWs && this.ws === currentWs) {
+        this.resetInactivityTimer();
         this.emit("message", event);
       }
     };
@@ -138,6 +143,7 @@ export class ReconnectingWebSocket {
       // Only process if event is from the current socket
       if (event.target === currentWs && this.ws === currentWs) {
         this.stopHealthCheck();
+        this.stopInactivityTimer();
         this.emit("close", { code: event.code, reason: event.reason });
 
         if (!this.forcedClose) {
@@ -217,6 +223,39 @@ export class ReconnectingWebSocket {
     }
   }
 
+  startInactivityTimer() {
+    this.stopInactivityTimer();
+
+    if (this.options.watchingInactivityTimeout <= 0) {
+      return;
+    }
+
+    this.inactivityTimeout = setTimeout(() => {
+      // Only trigger if we're not forcing a close and we expect to be connected
+      if (this.forcedClose) {
+        return;
+      }
+
+      // Trigger reconnection due to inactivity
+      if (this.ws) {
+        this.ws.close();
+      }
+    }, this.options.watchingInactivityTimeout);
+  }
+
+  stopInactivityTimer() {
+    if (this.inactivityTimeout) {
+      clearTimeout(this.inactivityTimeout);
+      this.inactivityTimeout = undefined;
+    }
+  }
+
+  resetInactivityTimer() {
+    if (this.options.watchingInactivityTimeout > 0) {
+      this.startInactivityTimer();
+    }
+  }
+
   clearTimers() {
     if (this.connectTimeout) {
       clearTimeout(this.connectTimeout);
@@ -240,6 +279,7 @@ export class ReconnectingWebSocket {
     }
 
     this.stopHealthCheck();
+    this.stopInactivityTimer();
   }
 
   addEventListener(event: EventType, listener: Listener) {

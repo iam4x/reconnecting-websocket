@@ -7,6 +7,7 @@ A robust, TypeScript-first WebSocket client with automatic reconnection, exponen
 - ✅ **Automatic Reconnection** - Automatically reconnects on connection loss with exponential backoff
 - ✅ **Message Queueing** - Messages sent while disconnected are queued and delivered on reconnection
 - ✅ **Connection Timeout** - Configurable timeout to detect stalled connections
+- ✅ **Inactivity Detection** - Optionally reconnect when no messages are received within a timeout
 - ✅ **Event-Driven API** - Familiar event listener pattern matching WebSocket API
 - ✅ **TypeScript Support** - Full TypeScript definitions included
 - ✅ **Customizable** - Configurable retry delays, backoff factors, and WebSocket implementations
@@ -77,6 +78,8 @@ interface ReconnectOptions {
   maxRetryDelay?: number;        // Maximum retry delay in ms (default: 30000)
   connectionTimeout?: number;    // Connection timeout in ms (default: 10000)
   backoffFactor?: number;        // Exponential backoff multiplier (default: 2)
+  healthCheckInterval?: number;  // Health check interval in ms (default: 30000)
+  watchingInactivityTimeout?: number; // Inactivity timeout in ms (default: 0, disabled)
   WebSocketConstructor?: typeof WebSocket; // Custom WebSocket implementation
 }
 ```
@@ -87,6 +90,8 @@ interface ReconnectOptions {
 - **maxRetryDelay**: The maximum delay between reconnection attempts. The delay will grow exponentially but won't exceed this value
 - **connectionTimeout**: If a connection doesn't establish within this time, it will be aborted and retried
 - **backoffFactor**: The multiplier for exponential backoff. Each retry delay is multiplied by this factor
+- **healthCheckInterval**: Interval for checking if the socket is still healthy. Set to `0` to disable (default: 30000ms)
+- **watchingInactivityTimeout**: If no message is received within this timeout, the connection will be closed and a reconnection attempt will be made. Useful for detecting silent connection failures or keeping connections alive on servers that expect regular activity. Set to `0` to disable (default: 0, disabled). A common value is `300000` (5 minutes)
 - **WebSocketConstructor**: Allows you to provide a custom WebSocket implementation (useful for Node.js environments using libraries like `ws`)
 
 ### Methods
@@ -179,6 +184,26 @@ const ws = new ReconnectingWebSocket("wss://api.example.com", {
   maxRetryDelay: 60000,   // Cap at 60 seconds
   backoffFactor: 1.5,     // Gentle backoff
   connectionTimeout: 5000 // 5 second timeout
+});
+```
+
+### Inactivity Timeout
+
+Use `watchingInactivityTimeout` to automatically reconnect when no messages are received for a period of time. This is useful for detecting silent connection failures or when the server expects regular activity:
+
+```typescript
+const ws = new ReconnectingWebSocket("wss://api.example.com", {
+  watchingInactivityTimeout: 300000, // Reconnect if no message received for 5 minutes
+});
+
+ws.addEventListener("message", (event: MessageEvent) => {
+  // Each message received resets the inactivity timer
+  console.log("Received:", event.data);
+});
+
+ws.addEventListener("close", (event) => {
+  // This will fire when inactivity timeout triggers a reconnect
+  console.log("Connection closed:", event.code, event.reason);
 });
 ```
 
