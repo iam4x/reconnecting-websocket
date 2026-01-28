@@ -236,9 +236,29 @@ export class ReconnectingWebSocket {
         return;
       }
 
-      // Trigger reconnection due to inactivity
+      // Proactively trigger reconnection due to inactivity
+      // Don't rely on the close event as it may never fire on a stalled connection
       if (this.ws) {
+        // Stop health check to prevent it from also triggering reconnection
+        this.stopHealthCheck();
+
+        // Remove event listeners to prevent any late events from interfering
+        if (this.openFn) this.ws.removeEventListener("open", this.openFn);
+        if (this.msgFn) this.ws.removeEventListener("message", this.msgFn);
+        if (this.closeFn) this.ws.removeEventListener("close", this.closeFn);
+        if (this.errorFn) this.ws.removeEventListener("error", this.errorFn);
+
+        // Try to close the socket (may hang on stalled connections, but we don't wait)
         this.ws.close();
+
+        // Clear the socket reference
+        this.ws = undefined;
+
+        // Emit close event to listeners with a special code indicating inactivity timeout
+        this.emit("close", { code: 4000, reason: "Inactivity timeout" });
+
+        // Schedule reconnection directly without waiting for close event
+        this.scheduleReconnect();
       }
     }, this.options.watchingInactivityTimeout);
   }

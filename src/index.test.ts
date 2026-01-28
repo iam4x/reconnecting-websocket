@@ -1141,5 +1141,91 @@ describe("ReconnectingWebSocket", () => {
       // Should have created a third connection
       expect(created.length).toBe(3);
     });
+
+    it("should reconnect even when close event never fires (stalled connection)", () => {
+      // This test simulates a truly stalled connection where calling close()
+      // does NOT fire the close event (e.g., dead TCP connection, NAT timeout)
+
+      // Create a special FakeWebSocket that does NOT dispatch close event
+      class StalledFakeWebSocket extends EventTarget {
+        static OPEN = 1;
+        static CONNECTING = 0;
+        static CLOSED = 3;
+        readyState: number = StalledFakeWebSocket.CONNECTING;
+        sentData: any[] = [];
+        bufferedAmount: number = 0;
+        constructor(_url: string, _protocols?: string | string[]) {
+          super();
+          created.push(this);
+          this.readyState = StalledFakeWebSocket.CONNECTING;
+          this.bufferedAmount = 0;
+        }
+        send(data: any) {
+          this.sentData.push(data);
+        }
+        close() {
+          // Simulate stalled connection: set readyState but DO NOT dispatch close event
+          // This simulates a dead connection where the closing handshake hangs
+          this.readyState = StalledFakeWebSocket.CLOSED;
+          // NOTE: Intentionally NOT dispatching close event
+        }
+      }
+
+      Object.assign(StalledFakeWebSocket.prototype, {
+        OPEN: StalledFakeWebSocket.OPEN,
+        CONNECTING: StalledFakeWebSocket.CONNECTING,
+        CLOSED: StalledFakeWebSocket.CLOSED,
+      });
+
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: StalledFakeWebSocket as any,
+        watchingInactivityTimeout: 100,
+        retryDelay: 50,
+      });
+
+      const closes: any[] = [];
+      ws.addEventListener("close", (ev) => closes.push(ev));
+
+      // First connection
+      const firstInstance = created[0];
+      expect(created.length).toBe(1);
+
+      // Open the connection
+      firstInstance.readyState = StalledFakeWebSocket.OPEN;
+      firstInstance.dispatchEvent(new Event("open"));
+
+      // At this point, inactivity timer has been started
+      // Don't flush yet - verify we're connected
+      expect(ws.readyState).toBe(StalledFakeWebSocket.OPEN);
+
+      // Flush timers - this triggers the inactivity timeout
+      // The inactivity handler calls this.ws.close()
+      // With StalledFakeWebSocket, close() does NOT fire the close event
+      // BUG: Without the close event, closeFn never runs, scheduleReconnect is never called
+      flushTimers();
+
+      // Flush again to execute any scheduled reconnect timeout
+      flushTimers();
+
+      // Flush once more just to be sure
+      flushTimers();
+
+      // With the current (buggy) implementation:
+      // - The inactivity timeout fires and calls ws.close()
+      // - close() sets readyState to CLOSED but doesn't fire close event
+      // - closeFn never runs, so scheduleReconnect() is never called
+      // - No new connection is created
+      // - closes array is empty because we never emitted close
+
+      // With the fix:
+      // - The inactivity handler should emit close and schedule reconnect directly
+      // - A new connection should be created
+      // - closes array should have 1 entry
+
+      // This assertion will FAIL with the buggy implementation (created.length will be 1)
+      // After the fix, it should pass (created.length will be 2)
+      expect(closes.length).toBe(1);
+      expect(created.length).toBe(2);
+    });
   });
 });
