@@ -143,6 +143,30 @@ describe("ReconnectingWebSocket", () => {
     expect(created.length).toBe(2);
   });
 
+  it("should still reconnect when a close listener throws", () => {
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      retryDelay: 100,
+    });
+
+    const instance = created[0];
+    instance.readyState = FakeWebSocket.OPEN;
+    instance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    ws.addEventListener("close", () => {
+      throw new Error("close listener boom");
+    });
+
+    expect(() => instance.dispatchEvent(new CloseEvent("close"))).toThrow(
+      "close listener boom",
+    );
+
+    flushTimers();
+
+    expect(created.length).toBe(2);
+  });
+
   it("should not reconnect after forced close", () => {
     const ws = new ReconnectingWebSocket("ws://test", {
       WebSocketConstructor: FakeWebSocket as any,
@@ -269,6 +293,35 @@ describe("ReconnectingWebSocket", () => {
     // Check that both open and reconnect were emitted for the second connection
     expect(opens.length).toBe(2);
     expect(reconnects.length).toBe(1);
+  });
+
+  it("should finish open lifecycle work when an open listener throws", () => {
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      retryDelay: 100,
+    });
+
+    const instance = created[0];
+    ws.send("queued-before-open");
+
+    ws.addEventListener("open", () => {
+      throw new Error("open listener boom");
+    });
+
+    instance.readyState = FakeWebSocket.OPEN;
+
+    expect(() => instance.dispatchEvent(new Event("open"))).toThrow(
+      "open listener boom",
+    );
+
+    expect(instance.sentData).toEqual(["queued-before-open"]);
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN);
+    expect(ws.wasConnected).toBe(true);
+
+    instance.dispatchEvent(new CloseEvent("close"));
+    flushTimers();
+
+    expect(created.length).toBe(2);
   });
 
   it("should not emit reconnect on first connection", () => {
@@ -1102,6 +1155,28 @@ describe("ReconnectingWebSocket", () => {
 
       // Should have received close event
       expect(closes.length).toBe(1);
+    });
+
+    it("should still reconnect when an inactivity close listener throws", () => {
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: FakeWebSocket as any,
+        watchingInactivityTimeout: 100,
+        retryDelay: 50,
+      });
+
+      const instance = created[0];
+      instance.readyState = FakeWebSocket.OPEN;
+      instance.dispatchEvent(new Event("open"));
+
+      ws.addEventListener("close", () => {
+        throw new Error("inactivity close listener boom");
+      });
+
+      expect(() => flushTimers()).toThrow("inactivity close listener boom");
+
+      flushTimers();
+
+      expect(created.length).toBe(2);
     });
 
     it("should restart inactivity timer after reconnection", () => {

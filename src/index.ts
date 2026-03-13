@@ -113,21 +113,27 @@ export class ReconnectingWebSocket {
     this.openFn = (event: Event) => {
       // Only process if event is from the current socket
       if (event.target === currentWs && this.ws === currentWs) {
+        const isReconnect = this.wasConnected;
+
         this.clearTimers();
         this.retryCount = 0;
-        this.emit("open", event);
-
-        // Emit reconnect event if this was a reconnection after a disconnection
-        if (this.wasConnected) {
-          this.emit("reconnect", event);
-        }
-
         this.wasConnected = true;
         this.startHealthCheck();
         this.startInactivityTimer();
 
-        // Flush any queued messages now that socket is open
-        this.flushMessageQueue();
+        this.runWithFinalizer(
+          () => {
+            this.emit("open", event);
+
+            if (isReconnect) {
+              this.emit("reconnect", event);
+            }
+          },
+          () => {
+            // Flush queued messages even if a listener throws during open/reconnect.
+            this.flushMessageQueue();
+          },
+        );
       }
     };
 
@@ -142,13 +148,21 @@ export class ReconnectingWebSocket {
     this.closeFn = (event: CloseEvent) => {
       // Only process if event is from the current socket
       if (event.target === currentWs && this.ws === currentWs) {
+        const shouldReconnect = !this.forcedClose;
+
         this.stopHealthCheck();
         this.stopInactivityTimer();
-        this.emit("close", { code: event.code, reason: event.reason });
 
-        if (!this.forcedClose) {
-          this.scheduleReconnect();
-        }
+        this.runWithFinalizer(
+          () => {
+            this.emit("close", { code: event.code, reason: event.reason });
+          },
+          () => {
+            if (shouldReconnect) {
+              this.scheduleReconnect();
+            }
+          },
+        );
       }
     };
 
@@ -169,6 +183,33 @@ export class ReconnectingWebSocket {
   emit(event: EventType, payload: any) {
     for (const listener of this.listeners[event]) {
       listener(payload);
+    }
+  }
+
+  private runWithFinalizer(action: () => void, finalizer?: () => void) {
+    let didThrow = false;
+    let thrown: unknown;
+
+    try {
+      action();
+    } catch (error) {
+      didThrow = true;
+      thrown = error;
+    } finally {
+      if (finalizer) {
+        try {
+          finalizer();
+        } catch (error) {
+          if (!didThrow) {
+            didThrow = true;
+            thrown = error;
+          }
+        }
+      }
+    }
+
+    if (didThrow) {
+      throw thrown;
     }
   }
 
@@ -236,6 +277,8 @@ export class ReconnectingWebSocket {
         return;
       }
 
+      const shouldReconnect = !this.forcedClose;
+
       // Proactively trigger reconnection due to inactivity
       // Don't rely on the close event as it may never fire on a stalled connection
       if (this.ws) {
@@ -254,11 +297,18 @@ export class ReconnectingWebSocket {
         // Clear the socket reference
         this.ws = undefined;
 
-        // Emit close event to listeners with a special code indicating inactivity timeout
-        this.emit("close", { code: 4000, reason: "Inactivity timeout" });
-
-        // Schedule reconnection directly without waiting for close event
-        this.scheduleReconnect();
+        this.runWithFinalizer(
+          () => {
+            // Emit close event to listeners with a special code indicating inactivity timeout.
+            this.emit("close", { code: 4000, reason: "Inactivity timeout" });
+          },
+          () => {
+            if (shouldReconnect) {
+              // Schedule reconnection directly without waiting for close event.
+              this.scheduleReconnect();
+            }
+          },
+        );
       }
     }, this.options.watchingInactivityTimeout);
   }
