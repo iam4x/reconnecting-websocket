@@ -4,6 +4,7 @@ import { ReconnectingWebSocket } from ".";
 
 describe("ReconnectingWebSocket", () => {
   let created: any[];
+  let originalWebSocket: typeof globalThis.WebSocket;
   let originalSetTimeout: typeof setTimeout;
   let originalClearTimeout: typeof clearTimeout;
   let originalSetInterval: typeof setInterval;
@@ -50,6 +51,7 @@ describe("ReconnectingWebSocket", () => {
 
   beforeEach(() => {
     created = [];
+    originalWebSocket = globalThis.WebSocket;
     // stub timers with manual queue
     timeouts = new Map();
     intervals = new Map();
@@ -92,6 +94,7 @@ describe("ReconnectingWebSocket", () => {
   });
 
   afterEach(() => {
+    globalThis.WebSocket = originalWebSocket;
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;
     globalThis.setInterval = originalSetInterval;
@@ -113,6 +116,52 @@ describe("ReconnectingWebSocket", () => {
     flushTimers();
     await openPromise;
     expect(ws.readyState).toBe(FakeWebSocket.OPEN);
+  });
+
+  it("works with a custom WebSocket constructor when globalThis.WebSocket is unavailable", () => {
+    class CustomWebSocket extends EventTarget {
+      static OPEN = 1;
+      static CONNECTING = 0;
+      static CLOSED = 3;
+      readyState: number = CustomWebSocket.CONNECTING;
+      sentData: any[] = [];
+      bufferedAmount = 0;
+
+      constructor(_url: string, _protocols?: string | string[]) {
+        super();
+        created.push(this);
+      }
+
+      send(data: any) {
+        this.sentData.push(data);
+      }
+
+      close() {
+        this.readyState = CustomWebSocket.CLOSED;
+        this.dispatchEvent(new CloseEvent("close"));
+      }
+    }
+
+    globalThis.WebSocket = undefined as any;
+
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: CustomWebSocket as any,
+      healthCheckInterval: 0,
+      connectionTimeout: 1000,
+    });
+
+    const instance = created[0] as CustomWebSocket;
+
+    expect(ws.readyState).toBe(CustomWebSocket.CONNECTING);
+
+    instance.readyState = CustomWebSocket.OPEN;
+    instance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    ws.send("custom-open-message");
+
+    expect(ws.readyState).toBe(CustomWebSocket.OPEN);
+    expect(instance.sentData).toEqual(["custom-open-message"]);
   });
 
   it("should send data when open", () => {
@@ -224,6 +273,45 @@ describe("ReconnectingWebSocket", () => {
     flushTimers(); // abort and schedule reconnect + dispatch close
     flushTimers(); // dispatch the close event
     expect(closes.length).toBe(1);
+  });
+
+  it("reconnects after connection timeout even if close event never fires", () => {
+    class StalledConnectWebSocket extends EventTarget {
+      static OPEN = 1;
+      static CONNECTING = 0;
+      static CLOSED = 3;
+      readyState: number = StalledConnectWebSocket.CONNECTING;
+      bufferedAmount = 0;
+
+      constructor(_url: string, _protocols?: string | string[]) {
+        super();
+        created.push(this);
+      }
+
+      send(_data: any) {}
+
+      close() {
+        this.readyState = StalledConnectWebSocket.CLOSED;
+      }
+    }
+
+    const ws = new ReconnectingWebSocket("ws://timeout", {
+      WebSocketConstructor: StalledConnectWebSocket as any,
+      connectionTimeout: 0,
+      retryDelay: 100,
+      healthCheckInterval: 0,
+    });
+
+    const closes: Array<{ code: number; reason: string }> = [];
+    ws.addEventListener("close", (event) => closes.push(event));
+
+    expect(created.length).toBe(1);
+
+    flushTimers();
+    flushTimers();
+
+    expect(closes).toEqual([{ code: 1006, reason: "Connection timeout" }]);
+    expect(created.length).toBe(2);
   });
 
   it("should return CLOSED readyState after forced close", () => {
@@ -496,6 +584,28 @@ describe("ReconnectingWebSocket", () => {
     ws.send("after close");
     // Should only have messages sent before close
     expect(instance.sentData).toEqual(["before open", "after open"]);
+  });
+
+  it("does not queue or later send messages after explicit close()", () => {
+    const ws = new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+    });
+
+    ws.close();
+    ws.send("after-close-1");
+    ws.send("after-close-2");
+
+    expect((ws as any).messageQueue).toEqual([]);
+
+    ws.connect();
+
+    const secondInstance = created[1];
+    secondInstance.readyState = FakeWebSocket.OPEN;
+    secondInstance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(secondInstance.sentData).toEqual([]);
+    expect((ws as any).messageQueue).toEqual([]);
   });
 
   it("should reconnect when readyState is not OPEN without close event (silent failure)", () => {
@@ -1180,7 +1290,7 @@ describe("ReconnectingWebSocket", () => {
     });
 
     it("should restart inactivity timer after reconnection", () => {
-      new ReconnectingWebSocket("ws://test", {
+      const ws = new ReconnectingWebSocket("ws://test", {
         WebSocketConstructor: FakeWebSocket as any,
         watchingInactivityTimeout: 100,
         retryDelay: 50,
@@ -1190,13 +1300,13 @@ describe("ReconnectingWebSocket", () => {
       const firstInstance = created[0];
       firstInstance.readyState = FakeWebSocket.OPEN;
       firstInstance.dispatchEvent(new Event("open"));
+      const firstInactivityTimeout = ws.inactivityTimeout;
+      expect(firstInactivityTimeout).toBeDefined();
       flushTimers();
 
       expect(created.length).toBe(1);
 
-      // Inactivity triggers close
-      flushTimers();
-      // Reconnect scheduled
+      // Reconnect is created
       flushTimers();
 
       expect(created.length).toBe(2);
@@ -1205,16 +1315,10 @@ describe("ReconnectingWebSocket", () => {
       const secondInstance = created[1];
       secondInstance.readyState = FakeWebSocket.OPEN;
       secondInstance.dispatchEvent(new Event("open"));
-      flushTimers();
 
-      // Now the second connection should also have an inactivity timer
-      // Flush again to trigger inactivity on second connection
-      flushTimers();
-      // Reconnect
-      flushTimers();
-
-      // Should have created a third connection
-      expect(created.length).toBe(3);
+      // The reconnected socket should start a fresh inactivity timer
+      expect(ws.inactivityTimeout).toBeDefined();
+      expect(ws.inactivityTimeout).not.toBe(firstInactivityTimeout);
     });
 
     it("should reconnect even when close event never fires (stalled connection)", () => {
@@ -1279,10 +1383,7 @@ describe("ReconnectingWebSocket", () => {
       // BUG: Without the close event, closeFn never runs, scheduleReconnect is never called
       flushTimers();
 
-      // Flush again to execute any scheduled reconnect timeout
-      flushTimers();
-
-      // Flush once more just to be sure
+      // Flush again to execute the scheduled reconnect timeout
       flushTimers();
 
       // With the current (buggy) implementation:

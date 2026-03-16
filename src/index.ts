@@ -1,5 +1,8 @@
 type EventType = "open" | "message" | "close" | "reconnect" | "error";
 type Listener = (payload: any) => void;
+type WebSocketState = "CONNECTING" | "OPEN" | "CLOSED";
+type WebSocketWithStates = typeof WebSocket &
+  Partial<Record<WebSocketState, number>>;
 
 interface ReconnectOptions {
   retryDelay?: number;
@@ -45,7 +48,7 @@ export class ReconnectingWebSocket {
   private messageQueue: Parameters<WebSocket["send"]>[] = [];
 
   get readyState() {
-    return this.ws?.readyState ?? WebSocket.CLOSED;
+    return this.ws?.readyState ?? this.getSocketState("CLOSED");
   }
 
   get bufferedAmount() {
@@ -73,15 +76,14 @@ export class ReconnectingWebSocket {
     this.forcedClose = false;
 
     // Remove event listeners from old socket
-    if (this.openFn) this.ws?.removeEventListener("open", this.openFn);
-    if (this.msgFn) this.ws?.removeEventListener("message", this.msgFn);
-    if (this.closeFn) this.ws?.removeEventListener("close", this.closeFn);
-    if (this.errorFn) this.ws?.removeEventListener("error", this.errorFn);
+    if (this.ws) {
+      this.removeSocketListeners(this.ws);
+    }
 
     // Close old socket if still connecting or open
     if (
-      this.ws?.readyState === WebSocket.CONNECTING ||
-      this.ws?.readyState === WebSocket.OPEN
+      this.ws?.readyState === this.getSocketState("CONNECTING") ||
+      this.ws?.readyState === this.getSocketState("OPEN")
     ) {
       this.ws?.close();
     }
@@ -89,18 +91,25 @@ export class ReconnectingWebSocket {
     // Clear any pending timers (this also removes abort listener from old controller)
     this.clearTimers();
 
+    // Create new socket
+    this.ws = new this.options.WebSocketConstructor(this.options.url);
+    const currentWs = this.ws;
+
     // Create new abort controller
     this.abortController = new AbortController();
     this.abortHandler = () => {
-      if (this.ws?.readyState === WebSocket.CONNECTING) {
-        this.ws.close();
+      if (
+        this.ws === currentWs &&
+        currentWs.readyState === this.getSocketState("CONNECTING")
+      ) {
+        this.forceReconnectForSocket(currentWs, {
+          code: 1006,
+          reason: "Connection timeout",
+        });
       }
     };
 
     this.abortController.signal.addEventListener("abort", this.abortHandler);
-
-    // Create new socket
-    this.ws = new this.options.WebSocketConstructor(this.options.url);
 
     this.connectTimeout = setTimeout(() => {
       this.abortController?.abort();
@@ -108,8 +117,6 @@ export class ReconnectingWebSocket {
 
     // Create and store new event handlers
     // Capture the new socket reference to check against in handlers
-    const currentWs = this.ws;
-
     this.openFn = (event: Event) => {
       // Only process if event is from the current socket
       if (event.target === currentWs && this.ws === currentWs) {
@@ -180,6 +187,53 @@ export class ReconnectingWebSocket {
     currentWs.addEventListener("error", this.errorFn);
   }
 
+  private getSocketState(state: WebSocketState) {
+    const fallbackStates = {
+      CONNECTING: 0,
+      OPEN: 1,
+      CLOSED: 3,
+    } as const;
+
+    const WebSocketConstructor = this.options
+      .WebSocketConstructor as WebSocketWithStates;
+
+    return WebSocketConstructor[state] ?? fallbackStates[state];
+  }
+
+  private removeSocketListeners(socket: WebSocket) {
+    if (this.openFn) socket.removeEventListener("open", this.openFn);
+    if (this.msgFn) socket.removeEventListener("message", this.msgFn);
+    if (this.closeFn) socket.removeEventListener("close", this.closeFn);
+    if (this.errorFn) socket.removeEventListener("error", this.errorFn);
+  }
+
+  private forceReconnectForSocket(
+    socket: WebSocket,
+    closePayload: { code: number; reason: string },
+  ) {
+    const shouldReconnect = !this.forcedClose;
+
+    this.stopHealthCheck();
+    this.stopInactivityTimer();
+    this.removeSocketListeners(socket);
+    socket.close();
+
+    if (this.ws === socket) {
+      this.ws = undefined;
+    }
+
+    this.runWithFinalizer(
+      () => {
+        this.emit("close", closePayload);
+      },
+      () => {
+        if (shouldReconnect) {
+          this.scheduleReconnect();
+        }
+      },
+    );
+  }
+
   emit(event: EventType, payload: any) {
     for (const listener of this.listeners[event]) {
       listener(payload);
@@ -238,16 +292,24 @@ export class ReconnectingWebSocket {
       return;
     }
 
+    const currentWs = this.ws;
+    if (!currentWs) {
+      return;
+    }
+
     this.healthCheckInterval = setInterval(() => {
       // Only check if we're not forcing a close and we expect to be connected
-      if (this.forcedClose) {
+      if (this.forcedClose || this.ws !== currentWs) {
         return;
       }
 
       // If we've been connected before and the socket is not OPEN, trigger reconnection
-      if (this.wasConnected && this.readyState !== WebSocket.OPEN) {
+      if (
+        this.wasConnected &&
+        currentWs.readyState !== this.getSocketState("OPEN")
+      ) {
         // Clear the existing socket reference since it's in a bad state
-        if (this.ws) {
+        if (this.ws === currentWs) {
           // Don't emit close event since we didn't receive one - this is a silent failure
           this.ws = undefined;
         }
@@ -271,45 +333,23 @@ export class ReconnectingWebSocket {
       return;
     }
 
+    const currentWs = this.ws;
+    if (!currentWs) {
+      return;
+    }
+
     this.inactivityTimeout = setTimeout(() => {
       // Only trigger if we're not forcing a close and we expect to be connected
-      if (this.forcedClose) {
+      if (this.forcedClose || this.ws !== currentWs) {
         return;
       }
 
-      const shouldReconnect = !this.forcedClose;
-
       // Proactively trigger reconnection due to inactivity
       // Don't rely on the close event as it may never fire on a stalled connection
-      if (this.ws) {
-        // Stop health check to prevent it from also triggering reconnection
-        this.stopHealthCheck();
-
-        // Remove event listeners to prevent any late events from interfering
-        if (this.openFn) this.ws.removeEventListener("open", this.openFn);
-        if (this.msgFn) this.ws.removeEventListener("message", this.msgFn);
-        if (this.closeFn) this.ws.removeEventListener("close", this.closeFn);
-        if (this.errorFn) this.ws.removeEventListener("error", this.errorFn);
-
-        // Try to close the socket (may hang on stalled connections, but we don't wait)
-        this.ws.close();
-
-        // Clear the socket reference
-        this.ws = undefined;
-
-        this.runWithFinalizer(
-          () => {
-            // Emit close event to listeners with a special code indicating inactivity timeout.
-            this.emit("close", { code: 4000, reason: "Inactivity timeout" });
-          },
-          () => {
-            if (shouldReconnect) {
-              // Schedule reconnection directly without waiting for close event.
-              this.scheduleReconnect();
-            }
-          },
-        );
-      }
+      this.forceReconnectForSocket(currentWs, {
+        code: 4000,
+        reason: "Inactivity timeout",
+      });
     }, this.options.watchingInactivityTimeout);
   }
 
@@ -361,7 +401,11 @@ export class ReconnectingWebSocket {
   }
 
   send(...args: Parameters<WebSocket["send"]>) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.forcedClose) {
+      return;
+    }
+
+    if (this.ws?.readyState === this.getSocketState("OPEN")) {
       this.ws.send(...args);
     } else {
       this.messageQueue.push(args);
@@ -371,7 +415,7 @@ export class ReconnectingWebSocket {
   private flushMessageQueue() {
     while (
       this.messageQueue.length > 0 &&
-      this.ws?.readyState === WebSocket.OPEN
+      this.ws?.readyState === this.getSocketState("OPEN")
     ) {
       const args = this.messageQueue.shift()!;
       this.ws.send(...args);
@@ -387,10 +431,7 @@ export class ReconnectingWebSocket {
 
     if (this.ws) {
       // Remove event listeners before closing to prevent memory leaks
-      if (this.openFn) this.ws.removeEventListener("open", this.openFn);
-      if (this.msgFn) this.ws.removeEventListener("message", this.msgFn);
-      if (this.closeFn) this.ws.removeEventListener("close", this.closeFn);
-      if (this.errorFn) this.ws.removeEventListener("error", this.errorFn);
+      this.removeSocketListeners(this.ws);
 
       this.ws.close(...args);
       this.ws = undefined;
