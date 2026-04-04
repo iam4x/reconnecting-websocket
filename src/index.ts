@@ -12,6 +12,7 @@ interface ReconnectOptions {
   WebSocketConstructor?: typeof WebSocket;
   healthCheckInterval?: number;
   watchingInactivityTimeout?: number;
+  websocketOptions?: any;
 }
 
 export class ReconnectingWebSocket {
@@ -65,6 +66,7 @@ export class ReconnectingWebSocket {
       WebSocketConstructor: options.WebSocketConstructor ?? WebSocket,
       healthCheckInterval: options.healthCheckInterval ?? 30_000,
       watchingInactivityTimeout: options.watchingInactivityTimeout ?? 0, // disabled by default, set to 300_000 for 5 minutes
+      websocketOptions: options.websocketOptions ?? undefined,
     };
 
     this.connect();
@@ -92,7 +94,11 @@ export class ReconnectingWebSocket {
     this.clearTimers();
 
     // Create new socket
-    this.ws = new this.options.WebSocketConstructor(this.options.url);
+    this.ws = new this.options.WebSocketConstructor(
+      this.options.url,
+      this.options.websocketOptions,
+    );
+
     const currentWs = this.ws;
 
     // Create new abort controller
