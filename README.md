@@ -7,7 +7,8 @@ A robust, TypeScript-first WebSocket client with automatic reconnection, exponen
 - ✅ **Automatic Reconnection** - Automatically reconnects on connection loss with exponential backoff
 - ✅ **Message Queueing** - Messages sent while disconnected are queued and delivered on reconnection
 - ✅ **Connection Timeout** - Configurable timeout to detect stalled connections
-- ✅ **Inactivity Detection** - Optionally reconnect when no messages are received within a timeout
+- ✅ **Socket State Polling** - Optionally reconnect if the socket leaves `OPEN` without a close event
+- ✅ **Inactivity Detection** - Optionally reconnect when expected messages stop arriving
 - ✅ **Event-Driven API** - Familiar event listener pattern matching WebSocket API
 - ✅ **TypeScript Support** - Full TypeScript definitions included
 - ✅ **Customizable** - Configurable retry delays, backoff factors, and WebSocket implementations
@@ -78,7 +79,7 @@ interface ReconnectOptions {
   maxRetryDelay?: number;        // Maximum retry delay in ms (default: 30000)
   connectionTimeout?: number;    // Connection timeout in ms (default: 10000)
   backoffFactor?: number;        // Exponential backoff multiplier (default: 2)
-  healthCheckInterval?: number;  // Health check interval in ms (default: 30000)
+  healthCheckInterval?: number;  // Socket state poll interval in ms (default: 30000)
   watchingInactivityTimeout?: number; // Inactivity timeout in ms (default: 0, disabled)
   WebSocketConstructor?: typeof WebSocket; // Custom WebSocket implementation
 }
@@ -90,9 +91,15 @@ interface ReconnectOptions {
 - **maxRetryDelay**: The maximum delay between reconnection attempts. The delay will grow exponentially but won't exceed this value
 - **connectionTimeout**: If a connection doesn't establish within this time, it will be aborted and retried
 - **backoffFactor**: The multiplier for exponential backoff. Each retry delay is multiplied by this factor
-- **healthCheckInterval**: Interval for checking if the socket is still healthy. Set to `0` to disable (default: 30000ms)
-- **watchingInactivityTimeout**: If no message is received within this timeout, the connection will be closed and a reconnection attempt will be made. Useful for detecting silent connection failures or keeping connections alive on servers that expect regular activity. Set to `0` to disable (default: 0, disabled). A common value is `300000` (5 minutes)
+- **healthCheckInterval**: Interval for polling `readyState`. This detects sockets that have already left `OPEN` without delivering a `close` event, but it does not detect half-open connections that still report `OPEN`. Set to `0` to disable (default: 30000ms)
+- **watchingInactivityTimeout**: If no message is received within this timeout, the connection will be closed and a reconnection attempt will be made. This is the supported way to recover from silent stalls on feeds that should receive regular inbound traffic. Set to `0` to disable (default: 0, disabled). A common value is `2x` to `3x` the longest expected gap between messages
 - **WebSocketConstructor**: Allows you to provide a custom WebSocket implementation (useful for Node.js environments using libraries like `ws`)
+
+`healthCheckInterval` and `watchingInactivityTimeout` solve different problems:
+
+- Use `healthCheckInterval` to recover when the underlying socket has already drifted out of `OPEN`.
+- Use `watchingInactivityTimeout` when your application expects regular inbound traffic and silence should be treated as a dead connection.
+- If your traffic is naturally sparse, keep `watchingInactivityTimeout` at `0` or implement an application/server ping-pong strategy.
 
 ### Methods
 
@@ -187,13 +194,14 @@ const ws = new ReconnectingWebSocket("wss://api.example.com", {
 });
 ```
 
-### Inactivity Timeout
+### Streaming Feed Recovery
 
-Use `watchingInactivityTimeout` to automatically reconnect when no messages are received for a period of time. This is useful for detecting silent connection failures or when the server expects regular activity:
+For streams that should receive regular updates or heartbeats, combine socket state polling with inactivity detection. Set `watchingInactivityTimeout` to roughly `2x` to `3x` the longest expected gap between inbound messages:
 
 ```typescript
 const ws = new ReconnectingWebSocket("wss://api.example.com", {
-  watchingInactivityTimeout: 300000, // Reconnect if no message received for 5 minutes
+  healthCheckInterval: 30000, // Poll readyState every 30s
+  watchingInactivityTimeout: 120000, // Reconnect if no message arrives for 2 minutes
 });
 
 ws.addEventListener("message", (event: MessageEvent) => {
@@ -206,6 +214,8 @@ ws.addEventListener("close", (event) => {
   console.log("Connection closed:", event.code, event.reason);
 });
 ```
+
+`healthCheckInterval` alone is not a full liveness probe. If a half-open connection remains stuck in `OPEN`, recovery depends on `watchingInactivityTimeout` or an explicit ping/pong protocol above this library.
 
 ### Using with Node.js
 

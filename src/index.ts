@@ -309,7 +309,8 @@ export class ReconnectingWebSocket {
         return;
       }
 
-      // If we've been connected before and the socket is not OPEN, trigger reconnection
+      // Poll socket state only. This catches sockets that drift out of OPEN
+      // without delivering a close event, but it does not prove application-level liveness.
       if (
         this.wasConnected &&
         currentWs.readyState !== this.getSocketState("OPEN")
@@ -350,8 +351,8 @@ export class ReconnectingWebSocket {
         return;
       }
 
-      // Proactively trigger reconnection due to inactivity
-      // Don't rely on the close event as it may never fire on a stalled connection
+      // Treat missing inbound traffic as a dead connection for chatty streams.
+      // Don't rely on the close event as it may never fire on a stalled connection.
       this.forceReconnectForSocket(currentWs, {
         code: 4000,
         reason: "Inactivity timeout",

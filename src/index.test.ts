@@ -638,6 +638,28 @@ describe("ReconnectingWebSocket", () => {
     expect(created.length).toBe(2);
   });
 
+  it("should not reconnect when socket stays OPEN but no messages arrive", () => {
+    new ReconnectingWebSocket("ws://test", {
+      WebSocketConstructor: FakeWebSocket as any,
+      healthCheckInterval: 100,
+      retryDelay: 50,
+    });
+
+    const instance = created[0];
+    instance.readyState = FakeWebSocket.OPEN;
+    instance.dispatchEvent(new Event("open"));
+    flushTimers();
+
+    expect(created.length).toBe(1);
+    expect(instance.readyState).toBe(FakeWebSocket.OPEN);
+
+    // Polling readyState alone should not treat an otherwise OPEN socket as dead.
+    flushTimers();
+    flushTimers();
+
+    expect(created.length).toBe(1);
+  });
+
   it("should not start health check if healthCheckInterval is 0", () => {
     new ReconnectingWebSocket("ws://test", {
       WebSocketConstructor: FakeWebSocket as any,
@@ -1100,7 +1122,7 @@ describe("ReconnectingWebSocket", () => {
   });
 
   describe("watching inactivity", () => {
-    it("should not start inactivity timer when watchingInactivityTimeout is 0 (default)", () => {
+    it("should not reconnect a quiet OPEN socket when watchingInactivityTimeout is 0 (default)", () => {
       new ReconnectingWebSocket("ws://test", {
         WebSocketConstructor: FakeWebSocket as any,
         // watchingInactivityTimeout defaults to 0 (disabled)
@@ -1111,7 +1133,7 @@ describe("ReconnectingWebSocket", () => {
       instance.dispatchEvent(new Event("open"));
       flushTimers();
 
-      // Simulate no messages received for a long time
+      // Simulate a quiet but otherwise OPEN connection.
       flushTimers();
       flushTimers();
 
@@ -1402,6 +1424,66 @@ describe("ReconnectingWebSocket", () => {
       // After the fix, it should pass (created.length will be 2)
       expect(closes.length).toBe(1);
       expect(created.length).toBe(2);
+    });
+
+    it("should emit synthetic close before reconnecting a stalled OPEN socket", () => {
+      class StalledFakeWebSocket extends EventTarget {
+        static OPEN = 1;
+        static CONNECTING = 0;
+        static CLOSED = 3;
+        readyState: number = StalledFakeWebSocket.CONNECTING;
+        sentData: any[] = [];
+        bufferedAmount: number = 0;
+        constructor(_url: string, _protocols?: string | string[]) {
+          super();
+          created.push(this);
+        }
+        send(data: any) {
+          this.sentData.push(data);
+        }
+        close() {
+          this.readyState = StalledFakeWebSocket.CLOSED;
+        }
+      }
+
+      Object.assign(StalledFakeWebSocket.prototype, {
+        OPEN: StalledFakeWebSocket.OPEN,
+        CONNECTING: StalledFakeWebSocket.CONNECTING,
+        CLOSED: StalledFakeWebSocket.CLOSED,
+      });
+
+      const ws = new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: StalledFakeWebSocket as any,
+        watchingInactivityTimeout: 100,
+        retryDelay: 50,
+      });
+
+      const events: string[] = [];
+      const closes: Array<{ code: number; reason: string }> = [];
+      ws.addEventListener("close", (event) => {
+        closes.push(event);
+        events.push(`close:${event.reason}`);
+      });
+      ws.addEventListener("reconnect", () => {
+        events.push("reconnect");
+      });
+
+      const firstInstance = created[0];
+      firstInstance.readyState = StalledFakeWebSocket.OPEN;
+      firstInstance.dispatchEvent(new Event("open"));
+
+      flushTimers();
+      expect(closes).toEqual([{ code: 4000, reason: "Inactivity timeout" }]);
+      expect(events).toEqual(["close:Inactivity timeout"]);
+
+      flushTimers();
+      expect(created.length).toBe(2);
+
+      const secondInstance = created[1];
+      secondInstance.readyState = StalledFakeWebSocket.OPEN;
+      secondInstance.dispatchEvent(new Event("open"));
+
+      expect(events).toEqual(["close:Inactivity timeout", "reconnect"]);
     });
   });
 });
