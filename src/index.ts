@@ -19,7 +19,6 @@ export class ReconnectingWebSocket {
   options: Required<ReconnectOptions & { url: string }>;
 
   ws?: WebSocket;
-  abortController?: AbortController;
 
   connectTimeout?: ReturnType<typeof setTimeout>;
   reconnectTimeout?: ReturnType<typeof setTimeout>;
@@ -35,7 +34,6 @@ export class ReconnectingWebSocket {
   private msgFn?: (event: MessageEvent) => void;
   private closeFn?: (event: CloseEvent) => void;
   private errorFn?: (event: Event) => void;
-  private abortHandler?: () => void;
 
   listeners: Record<EventType, Listener[]> = {
     open: [],
@@ -101,9 +99,7 @@ export class ReconnectingWebSocket {
 
     const currentWs = this.ws;
 
-    // Create new abort controller
-    this.abortController = new AbortController();
-    this.abortHandler = () => {
+    this.connectTimeout = setTimeout(() => {
       if (
         this.ws === currentWs &&
         currentWs.readyState === this.getSocketState("CONNECTING")
@@ -113,12 +109,6 @@ export class ReconnectingWebSocket {
           reason: "Connection timeout",
         });
       }
-    };
-
-    this.abortController.signal.addEventListener("abort", this.abortHandler);
-
-    this.connectTimeout = setTimeout(() => {
-      this.abortController?.abort();
     }, this.options.connectionTimeout);
 
     // Create and store new event handlers
@@ -368,17 +358,6 @@ export class ReconnectingWebSocket {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = undefined;
-    }
-
-    if (this.abortController && this.abortHandler) {
-      this.abortController.signal.removeEventListener(
-        "abort",
-        this.abortHandler,
-      );
-      this.abortController = undefined;
-      this.abortHandler = undefined;
-    } else if (this.abortController) {
-      this.abortController = undefined;
     }
 
     this.stopHealthCheck();
