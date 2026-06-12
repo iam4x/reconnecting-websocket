@@ -9,9 +9,14 @@ describe("ReconnectingWebSocket", () => {
   let originalClearTimeout: typeof clearTimeout;
   let originalSetInterval: typeof setInterval;
   let originalClearInterval: typeof clearInterval;
+  let originalDateNow: typeof Date.now;
   let timeouts: Map<number, () => void>;
   let intervals: Map<number, () => void>;
   let timerId: number;
+  let now: number;
+  let setTimeoutCalls: number;
+  let clearTimeoutCalls: number;
+  let advanceTime: (ms: number) => void;
   let flushTimers: () => void;
 
   class FakeWebSocket extends EventTarget {
@@ -56,18 +61,29 @@ describe("ReconnectingWebSocket", () => {
     timeouts = new Map();
     intervals = new Map();
     timerId = 1;
+    now = 1_000;
+    setTimeoutCalls = 0;
+    clearTimeoutCalls = 0;
     originalSetTimeout = globalThis.setTimeout;
     originalClearTimeout = globalThis.clearTimeout;
     originalSetInterval = globalThis.setInterval;
     originalClearInterval = globalThis.clearInterval;
+    originalDateNow = Date.now;
+
+    Date.now = () => now;
+    advanceTime = (ms: number) => {
+      now += ms;
+    };
 
     globalThis.setTimeout = ((fn: (...args: any[]) => void) => {
+      setTimeoutCalls += 1;
       const id = timerId++;
       timeouts.set(id, fn as () => void);
       return id as any;
     }) as unknown as typeof setTimeout;
 
     globalThis.clearTimeout = ((id?: any) => {
+      clearTimeoutCalls += 1;
       timeouts.delete(id);
     }) as unknown as typeof clearTimeout;
 
@@ -99,6 +115,7 @@ describe("ReconnectingWebSocket", () => {
     globalThis.clearTimeout = originalClearTimeout;
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
+    Date.now = originalDateNow;
   });
 
   it("should dispatch open event", async () => {
@@ -1155,7 +1172,9 @@ describe("ReconnectingWebSocket", () => {
 
       expect(created.length).toBe(1);
 
-      // Flush the inactivity timeout - this should close the socket
+      advanceTime(101);
+
+      // Flush the monitor interval - this should close the inactive socket
       flushTimers();
 
       // Flush the reconnect timeout
@@ -1165,7 +1184,7 @@ describe("ReconnectingWebSocket", () => {
       expect(created.length).toBe(2);
     });
 
-    it("should reset inactivity timer when message is received", () => {
+    it("should update inactivity timestamp without timeout churn when message is received", () => {
       const ws = new ReconnectingWebSocket("ws://test", {
         WebSocketConstructor: FakeWebSocket as any,
         watchingInactivityTimeout: 100,
@@ -1175,29 +1194,36 @@ describe("ReconnectingWebSocket", () => {
       const instance = created[0];
       instance.readyState = FakeWebSocket.OPEN;
       instance.dispatchEvent(new Event("open"));
-      // Don't flush yet - the inactivity timer is pending
 
       expect(created.length).toBe(1);
+      expect(timeouts.size).toBe(0);
+      expect(intervals.size).toBe(1);
 
-      // Receive a message - this should reset the inactivity timer
-      // The old timer is cleared and a new one is started
+      const openedAt = (ws as any).lastInboundAt;
+      const setTimeoutCallsBeforeMessages = setTimeoutCalls;
+      const clearTimeoutCallsBeforeMessages = clearTimeoutCalls;
+
+      advanceTime(10);
       instance.dispatchEvent(new MessageEvent("message", { data: "hello" }));
+      const firstMessageAt = (ws as any).lastInboundAt;
 
-      // Receive another message - this resets the timer again
+      advanceTime(10);
       instance.dispatchEvent(new MessageEvent("message", { data: "world" }));
+      const secondMessageAt = (ws as any).lastInboundAt;
 
-      // Now flush - only the latest inactivity timer should fire
-      // But since we just received a message, the timer was just reset
-      // So we're still connected
+      expect(firstMessageAt).toBe(openedAt + 10);
+      expect(secondMessageAt).toBe(firstMessageAt + 10);
+      expect(setTimeoutCalls).toBe(setTimeoutCallsBeforeMessages);
+      expect(clearTimeoutCalls).toBe(clearTimeoutCallsBeforeMessages);
+      expect(timeouts.size).toBe(0);
+      expect(intervals.size).toBe(1);
       expect(created.length).toBe(1);
       expect(ws.readyState).toBe(FakeWebSocket.OPEN);
 
-      // Now flush to trigger the inactivity timeout
+      advanceTime(101);
       flushTimers();
-      // Reconnect
       flushTimers();
 
-      // Now it should have reconnected after the inactivity timeout
       expect(created.length).toBe(2);
     });
 
@@ -1225,7 +1251,8 @@ describe("ReconnectingWebSocket", () => {
       ws.close();
       flushTimers();
 
-      // Even if inactivity timer was somehow still running, it should not reconnect
+      // Even if the monitor was somehow still running, it should not reconnect
+      advanceTime(101);
       flushTimers();
       flushTimers();
 
@@ -1233,7 +1260,7 @@ describe("ReconnectingWebSocket", () => {
       expect(created.length).toBe(1);
     });
 
-    it("should stop inactivity timer on close", () => {
+    it("should stop inactivity monitor on close", () => {
       const ws = new ReconnectingWebSocket("ws://test", {
         WebSocketConstructor: FakeWebSocket as any,
         watchingInactivityTimeout: 100,
@@ -1243,15 +1270,14 @@ describe("ReconnectingWebSocket", () => {
       const instance = created[0];
       instance.readyState = FakeWebSocket.OPEN;
       instance.dispatchEvent(new Event("open"));
-      // Don't flush here - inactivity timer is pending
 
       expect(created.length).toBe(1);
 
       // Close the connection normally (not via inactivity)
-      // This should stop the inactivity timer
+      // This should stop the inactivity monitor
       instance.dispatchEvent(new CloseEvent("close"));
 
-      // The close handler should have stopped the inactivity timer
+      // The close handler should have stopped the inactivity monitor
       // and scheduled a reconnect
       flushTimers(); // Trigger reconnect
 
@@ -1282,7 +1308,9 @@ describe("ReconnectingWebSocket", () => {
       instance.dispatchEvent(new Event("open"));
       flushTimers();
 
-      // Flush the inactivity timeout - should trigger close
+      advanceTime(101);
+
+      // Flush the monitor interval - should trigger close
       flushTimers();
 
       // Should have received close event
@@ -1304,6 +1332,7 @@ describe("ReconnectingWebSocket", () => {
         throw new Error("inactivity close listener boom");
       });
 
+      advanceTime(101);
       expect(() => flushTimers()).toThrow("inactivity close listener boom");
 
       flushTimers();
@@ -1311,7 +1340,7 @@ describe("ReconnectingWebSocket", () => {
       expect(created.length).toBe(2);
     });
 
-    it("should restart inactivity timer after reconnection", () => {
+    it("should refresh inactivity timestamp after reconnection", () => {
       const ws = new ReconnectingWebSocket("ws://test", {
         WebSocketConstructor: FakeWebSocket as any,
         watchingInactivityTimeout: 100,
@@ -1322,8 +1351,9 @@ describe("ReconnectingWebSocket", () => {
       const firstInstance = created[0];
       firstInstance.readyState = FakeWebSocket.OPEN;
       firstInstance.dispatchEvent(new Event("open"));
-      const firstInactivityTimeout = ws.inactivityTimeout;
-      expect(firstInactivityTimeout).toBeDefined();
+      const firstLastInboundAt = (ws as any).lastInboundAt;
+      expect(firstLastInboundAt).toBe(now);
+      advanceTime(101);
       flushTimers();
 
       expect(created.length).toBe(1);
@@ -1336,11 +1366,32 @@ describe("ReconnectingWebSocket", () => {
       // Second connection
       const secondInstance = created[1];
       secondInstance.readyState = FakeWebSocket.OPEN;
+      advanceTime(1);
       secondInstance.dispatchEvent(new Event("open"));
 
-      // The reconnected socket should start a fresh inactivity timer
-      expect(ws.inactivityTimeout).toBeDefined();
-      expect(ws.inactivityTimeout).not.toBe(firstInactivityTimeout);
+      expect((ws as any).lastInboundAt).toBe(now);
+      expect((ws as any).lastInboundAt).toBeGreaterThan(firstLastInboundAt);
+    });
+
+    it("should reconnect for inactivity when health check polling is disabled", () => {
+      new ReconnectingWebSocket("ws://test", {
+        WebSocketConstructor: FakeWebSocket as any,
+        healthCheckInterval: 0,
+        watchingInactivityTimeout: 100,
+        retryDelay: 50,
+      });
+
+      const instance = created[0];
+      instance.readyState = FakeWebSocket.OPEN;
+      instance.dispatchEvent(new Event("open"));
+
+      expect(intervals.size).toBe(1);
+
+      advanceTime(101);
+      flushTimers();
+      flushTimers();
+
+      expect(created.length).toBe(2);
     });
 
     it("should reconnect even when close event never fires (stalled connection)", () => {
@@ -1395,11 +1446,12 @@ describe("ReconnectingWebSocket", () => {
       firstInstance.readyState = StalledFakeWebSocket.OPEN;
       firstInstance.dispatchEvent(new Event("open"));
 
-      // At this point, inactivity timer has been started
-      // Don't flush yet - verify we're connected
+      // At this point, the inactivity monitor has been started.
       expect(ws.readyState).toBe(StalledFakeWebSocket.OPEN);
 
-      // Flush timers - this triggers the inactivity timeout
+      advanceTime(101);
+
+      // Flush timers - this triggers the inactivity monitor
       // The inactivity handler calls this.ws.close()
       // With StalledFakeWebSocket, close() does NOT fire the close event
       // BUG: Without the close event, closeFn never runs, scheduleReconnect is never called
@@ -1472,6 +1524,7 @@ describe("ReconnectingWebSocket", () => {
       firstInstance.readyState = StalledFakeWebSocket.OPEN;
       firstInstance.dispatchEvent(new Event("open"));
 
+      advanceTime(101);
       flushTimers();
       expect(closes).toEqual([{ code: 4000, reason: "Inactivity timeout" }]);
       expect(events).toEqual(["close:Inactivity timeout"]);

@@ -24,11 +24,11 @@ export class ReconnectingWebSocket {
   connectTimeout?: ReturnType<typeof setTimeout>;
   reconnectTimeout?: ReturnType<typeof setTimeout>;
   healthCheckInterval?: ReturnType<typeof setInterval>;
-  inactivityTimeout?: ReturnType<typeof setTimeout>;
 
   retryCount = 0;
   forcedClose = false;
   wasConnected = false;
+  private lastInboundAt?: number;
 
   // Store event handlers so we can remove them when cleaning up
   private openFn?: (event: Event) => void;
@@ -131,8 +131,8 @@ export class ReconnectingWebSocket {
         this.clearTimers();
         this.retryCount = 0;
         this.wasConnected = true;
+        this.lastInboundAt = Date.now();
         this.startHealthCheck();
-        this.startInactivityTimer();
 
         this.runWithFinalizer(
           () => {
@@ -153,7 +153,7 @@ export class ReconnectingWebSocket {
     this.msgFn = (event: MessageEvent) => {
       // Only process if event is from the current socket
       if (event.target === currentWs && this.ws === currentWs) {
-        this.resetInactivityTimer();
+        this.lastInboundAt = Date.now();
         this.emit("message", event);
       }
     };
@@ -164,7 +164,6 @@ export class ReconnectingWebSocket {
         const shouldReconnect = !this.forcedClose;
 
         this.stopHealthCheck();
-        this.stopInactivityTimer();
 
         this.runWithFinalizer(
           () => {
@@ -220,7 +219,6 @@ export class ReconnectingWebSocket {
     const shouldReconnect = !this.forcedClose;
 
     this.stopHealthCheck();
-    this.stopInactivityTimer();
     this.removeSocketListeners(socket);
     socket.close();
 
@@ -294,7 +292,10 @@ export class ReconnectingWebSocket {
   startHealthCheck() {
     this.stopHealthCheck();
 
-    if (this.options.healthCheckInterval <= 0) {
+    const shouldCheckReadyState = this.options.healthCheckInterval > 0;
+    const shouldCheckInactivity = this.options.watchingInactivityTimeout > 0;
+
+    if (!shouldCheckReadyState && !shouldCheckInactivity) {
       return;
     }
 
@@ -302,6 +303,16 @@ export class ReconnectingWebSocket {
     if (!currentWs) {
       return;
     }
+
+    const inactivityCheckInterval = Math.max(
+      1,
+      Math.ceil(this.options.watchingInactivityTimeout / 3),
+    );
+    const intervalDelay = shouldCheckReadyState
+      ? shouldCheckInactivity
+        ? Math.min(this.options.healthCheckInterval, inactivityCheckInterval)
+        : this.options.healthCheckInterval
+      : inactivityCheckInterval;
 
     this.healthCheckInterval = setInterval(() => {
       // Only check if we're not forcing a close and we expect to be connected
@@ -312,6 +323,7 @@ export class ReconnectingWebSocket {
       // Poll socket state only. This catches sockets that drift out of OPEN
       // without delivering a close event, but it does not prove application-level liveness.
       if (
+        shouldCheckReadyState &&
         this.wasConnected &&
         currentWs.readyState !== this.getSocketState("OPEN")
       ) {
@@ -322,54 +334,28 @@ export class ReconnectingWebSocket {
         }
         this.stopHealthCheck();
         this.scheduleReconnect();
+        return;
       }
-    }, this.options.healthCheckInterval);
+
+      if (
+        shouldCheckInactivity &&
+        this.lastInboundAt !== undefined &&
+        Date.now() - this.lastInboundAt > this.options.watchingInactivityTimeout
+      ) {
+        // Treat missing inbound traffic as a dead connection for chatty streams.
+        // Don't rely on the close event as it may never fire on a stalled connection.
+        this.forceReconnectForSocket(currentWs, {
+          code: 4000,
+          reason: "Inactivity timeout",
+        });
+      }
+    }, intervalDelay);
   }
 
   stopHealthCheck() {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = undefined;
-    }
-  }
-
-  startInactivityTimer() {
-    this.stopInactivityTimer();
-
-    if (this.options.watchingInactivityTimeout <= 0) {
-      return;
-    }
-
-    const currentWs = this.ws;
-    if (!currentWs) {
-      return;
-    }
-
-    this.inactivityTimeout = setTimeout(() => {
-      // Only trigger if we're not forcing a close and we expect to be connected
-      if (this.forcedClose || this.ws !== currentWs) {
-        return;
-      }
-
-      // Treat missing inbound traffic as a dead connection for chatty streams.
-      // Don't rely on the close event as it may never fire on a stalled connection.
-      this.forceReconnectForSocket(currentWs, {
-        code: 4000,
-        reason: "Inactivity timeout",
-      });
-    }, this.options.watchingInactivityTimeout);
-  }
-
-  stopInactivityTimer() {
-    if (this.inactivityTimeout) {
-      clearTimeout(this.inactivityTimeout);
-      this.inactivityTimeout = undefined;
-    }
-  }
-
-  resetInactivityTimer() {
-    if (this.options.watchingInactivityTimeout > 0) {
-      this.startInactivityTimer();
     }
   }
 
@@ -396,7 +382,6 @@ export class ReconnectingWebSocket {
     }
 
     this.stopHealthCheck();
-    this.stopInactivityTimer();
   }
 
   addEventListener(event: EventType, listener: Listener) {
